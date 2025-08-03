@@ -10,11 +10,11 @@ import (
 	"net/http"
 	"os/exec"
 	"strings"
-	"sync"
 	"time"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
+	"fyne.io/fyne/v2/data/binding"
 	"fyne.io/fyne/v2/driver/desktop"
 	"fyne.io/fyne/v2/widget"
 	"github.com/atotto/clipboard"
@@ -29,14 +29,13 @@ const (
 )
 
 type App struct {
-	ModelName string
+	modelName string
+	app       fyne.App
+	window    fyne.Window
 
-	app        fyne.App
-	window     fyne.Window
-	resultText *widget.Entry
-
-	statusMu   sync.Mutex
-	statusText *widget.Label
+	input  binding.String
+	result binding.String
+	status binding.String
 }
 
 type OllamaRequest struct {
@@ -53,7 +52,7 @@ type OllamaResponse struct {
 func New(app fyne.App) *App {
 	return &App{
 		app:       app,
-		ModelName: defaultModel,
+		modelName: defaultModel,
 	}
 }
 
@@ -81,61 +80,48 @@ func (a *App) setupApp() {
 	a.setupKeyboardShortcuts()
 
 	// Create UI elements
-	a.statusText = widget.NewLabel("Click 'Translate' to start translating")
-	a.statusText.Wrapping = fyne.TextWrapWord
+	a.status = binding.NewString()
+	a.status.Set("Click 'Translate' to start translating")
+	statusText := widget.NewLabelWithData(a.status)
+	statusText.Wrapping = fyne.TextWrapWord
 
-	a.resultText = widget.NewMultiLineEntry()
-	a.resultText.SetPlaceHolder("Translation will appear here...")
-	a.resultText.Wrapping = fyne.TextWrapWord
+	a.input = binding.NewString()
+	inputText := widget.NewEntryWithData(a.input)
+	inputText.SetPlaceHolder("Enter text to translate...")
+	inputText.MultiLine = true
+	inputText.Wrapping = fyne.TextWrapWord
 
-	// Create buttons
-	translateBtn := widget.NewButton("Translate Clipboard", func() {
-		a.translateClipboardText()
-	})
+	a.result = binding.NewString()
+	resultText := widget.NewEntryWithData(a.result)
+	resultText.SetPlaceHolder("Translation will appear here...")
+	resultText.MultiLine = true
+	resultText.Wrapping = fyne.TextWrapWord
 
-	translateSelectedBtn := widget.NewButton("Translate Selected", func() {
-		a.translateSelectedText()
-	})
+	buttonContainer := container.NewHBox(
+		widget.NewButton("Translate Clipboard", func() { a.translateClipboardText() }),
+		widget.NewButton("Translate", func() { a.translateInputText() }),
+		widget.NewButton("Settings", func() { a.showSettings() }),
+		widget.NewButton("Hide", func() { a.window.Hide() }),
+	)
 
-	closeBtn := widget.NewButton("Hide", func() {
-		a.window.Hide()
-	})
-
-	settingsBtn := widget.NewButton("Settings", func() {
-		a.showSettings()
-	})
-
-	buttonContainer := container.NewHBox(translateBtn, translateSelectedBtn, settingsBtn, closeBtn)
-
-	// Create top section with status and buttons
 	topSection := container.NewVBox(
-		a.statusText,
+		statusText,
 		widget.NewSeparator(),
 		buttonContainer,
 		widget.NewSeparator(),
+		widget.NewLabel("Input:"),
+		inputText,
 		widget.NewLabel("Translation:"),
 	)
 
-	// Use container.NewBorder to make text box take all remaining space
-	content := container.NewBorder(topSection, nil, nil, nil, a.resultText)
+	content := container.NewBorder(topSection, nil, nil, nil, resultText)
 
 	a.window.SetContent(content)
-	a.window.Show() // Show initially
+	a.window.Show()
 
-	// Try to set up system tray (optional)
 	if desk, ok := a.app.(desktop.App); ok {
-		menu := fyne.NewMenu("lai",
+		desk.SetSystemTrayMenu(fyne.NewMenu("lai",
 			fyne.NewMenuItem("Show", func() {
-				a.window.Show()
-				a.window.RequestFocus()
-			}),
-			fyne.NewMenuItem("Translate Clipboard", func() {
-				a.translateClipboardText()
-				a.window.Show()
-				a.window.RequestFocus()
-			}),
-			fyne.NewMenuItem("Translate Selected", func() {
-				a.translateSelectedText()
 				a.window.Show()
 				a.window.RequestFocus()
 			}),
@@ -143,25 +129,11 @@ func (a *App) setupApp() {
 			fyne.NewMenuItem("Quit", func() {
 				a.app.Quit()
 			}),
-		)
-		// System tray setup - this might not work on all macOS versions
-		desk.SetSystemTrayMenu(menu)
+		))
 	}
 }
 
 func (a *App) setupKeyboardShortcuts() {
-	// Set up global keyboard shortcut for translating selected text
-	// Shift+Option+T for translate selected text
-	shortcut := &desktop.CustomShortcut{
-		KeyName:  fyne.KeyT,
-		Modifier: fyne.KeyModifierShift | fyne.KeyModifierAlt,
-	}
-	a.window.Canvas().AddShortcut(shortcut, func(shortcut fyne.Shortcut) {
-		a.translateSelectedText()
-		a.window.Show()
-		a.window.RequestFocus()
-	})
-
 	// Shift+Option+C for translate clipboard
 	clipboardShortcut := &desktop.CustomShortcut{
 		KeyName:  fyne.KeyC,
@@ -174,39 +146,33 @@ func (a *App) setupKeyboardShortcuts() {
 	})
 }
 
-func (a *App) translateSelectedText() {
-	a.updateStatus("Getting selected text...")
-	text, err := a.getSelectedTextWithCopy()
+func (a *App) translateInputText() {
+	a.setStatus("Translating input text...")
+	a.result.Set("")
+	text, err := a.input.Get()
 	if err != nil {
-		a.updateStatus("Error: %v", err)
+		a.setStatus("Error getting input text: %v", err)
 		return
 	}
-
-	if text == "" {
-		a.updateStatus("No text selected.")
-		return
-	}
-
-	a.updateStatus("Translating selected text...")
-	a.resultText.SetText("") // Clear previous result
 	go a.streamTranslateWithOllama(text)
 }
 
 func (a *App) translateClipboardText() {
-	a.updateStatus("Getting clipboard text...")
+	a.setStatus("Getting clipboard text...")
 	text, err := clipboard.ReadAll()
 	if err != nil {
-		a.updateStatus("Error reading clipboard: %v", err)
+		a.setStatus("Error reading clipboard: %v", err)
 		return
 	}
 
 	if text == "" {
-		a.updateStatus("Clipboard is empty.")
+		a.setStatus("Clipboard is empty.")
 		return
 	}
 
-	a.updateStatus("Translating clipboard text...")
-	a.resultText.SetText("") // Clear previous result
+	a.setStatus("Translating clipboard text...")
+	a.result.Set("")
+	a.input.Set(text)
 	go a.streamTranslateWithOllama(text)
 }
 
@@ -245,6 +211,9 @@ func (a *App) getSelectedTextWithCopy() (string, error) {
 	return text, nil
 }
 
+//go:embed prompt.txt
+var promptTemplate string
+
 func (a *App) streamTranslateWithOllama(text string) {
 	stopTick := make(chan struct{})
 	defer close(stopTick)
@@ -256,23 +225,23 @@ func (a *App) streamTranslateWithOllama(text string) {
 			case <-stopTick:
 				return
 			case now := <-ticker:
-				a.updateStatus("Translating... %.1fs", now.Sub(startTime).Seconds())
+				a.setStatus("Translating... %.1fs", now.Sub(startTime).Seconds())
 			}
 		}
 	}()
 
 	// Create a smart translation prompt
-	prompt := fmt.Sprintf("Identify the language of the following text. If the text is in English, translate to German. If it is not in English, translate it to English. Provide only the translation, with no explanation or extra text.\n\n%s", text)
+	prompt := fmt.Sprintf(promptTemplate, text)
 
 	reqBody := OllamaRequest{
-		Model:  a.ModelName,
+		Model:  a.modelName,
 		Prompt: prompt,
 		Stream: true,
 	}
 
 	jsonData, err := json.Marshal(reqBody)
 	if err != nil {
-		a.updateStatus("Failed to marshal request: %v", err)
+		a.setStatus("Failed to marshal request: %v", err)
 		return
 	}
 
@@ -281,7 +250,7 @@ func (a *App) streamTranslateWithOllama(text string) {
 
 	req, err := http.NewRequestWithContext(ctx, "POST", ollamaURL, bytes.NewBuffer(jsonData))
 	if err != nil {
-		a.updateStatus("Failed to create request: %v", err)
+		a.setStatus("Failed to create request: %v", err)
 		return
 	}
 
@@ -290,13 +259,13 @@ func (a *App) streamTranslateWithOllama(text string) {
 	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
-		a.updateStatus("Failed to make request to Ollama: %v", err)
+		a.setStatus("Failed to make request to Ollama: %v", err)
 		return
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		a.updateStatus("Ollama returned status %d", resp.StatusCode)
+		a.setStatus("Ollama returned status %d", resp.StatusCode)
 		return
 	}
 
@@ -310,7 +279,7 @@ func (a *App) streamTranslateWithOllama(text string) {
 			if err.Error() == "EOF" {
 				break
 			}
-			a.updateStatus("Failed to decode response: %v", err)
+			a.setStatus("Failed to decode response: %v", err)
 			return
 		}
 
@@ -318,7 +287,7 @@ func (a *App) streamTranslateWithOllama(text string) {
 		fullResponse.WriteString(ollamaResp.Response)
 
 		// Update UI with current text
-		a.resultText.SetText(fullResponse.String())
+		a.result.Set(fullResponse.String())
 
 		if ollamaResp.Done {
 			break
@@ -326,12 +295,8 @@ func (a *App) streamTranslateWithOllama(text string) {
 	}
 }
 
-func (a *App) updateStatus(format string, args ...any) {
-	text := fmt.Sprintf(format, args...)
-
-	a.statusMu.Lock()
-	defer a.statusMu.Unlock()
-	a.statusText.SetText(text)
+func (a *App) setStatus(format string, args ...any) {
+	a.status.Set(fmt.Sprintf(format, args...))
 }
 
 func (a *App) showSettings() {
@@ -339,7 +304,7 @@ func (a *App) showSettings() {
 	settingsWindow.Resize(fyne.NewSize(350, 250))
 
 	modelEntry := widget.NewEntry()
-	modelEntry.SetText(a.ModelName)
+	modelEntry.SetText(a.modelName)
 	modelEntry.SetPlaceHolder("Enter Ollama model name")
 
 	ollamaURLEntry := widget.NewEntry()
@@ -348,8 +313,8 @@ func (a *App) showSettings() {
 
 	saveBtn := widget.NewButton("Save", func() {
 		// Update the model name
-		a.ModelName = modelEntry.Text
-		a.updateStatus("Settings saved. Using model: %s", a.ModelName)
+		a.modelName = modelEntry.Text
+		a.setStatus("Settings saved. Using model: %s", a.modelName)
 		settingsWindow.Close()
 	})
 
