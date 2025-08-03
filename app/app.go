@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os/exec"
 	"strings"
+	"sync"
 	"time"
 
 	"fyne.io/fyne/v2"
@@ -30,12 +31,12 @@ const (
 type App struct {
 	ModelName string
 
-	app         fyne.App
-	window      fyne.Window
-	statusText  *widget.Label
-	resultText  *widget.Entry
-	startTime   time.Time
-	isStreaming bool
+	app        fyne.App
+	window     fyne.Window
+	resultText *widget.Entry
+
+	statusMu   sync.Mutex
+	statusText *widget.Label
 }
 
 type OllamaRequest struct {
@@ -177,7 +178,7 @@ func (a *App) translateSelectedText() {
 	a.updateStatus("Getting selected text...")
 	text, err := a.getSelectedTextWithCopy()
 	if err != nil {
-		a.updateStatus(fmt.Sprintf("Error: %v", err))
+		a.updateStatus("Error: %v", err)
 		return
 	}
 
@@ -195,7 +196,7 @@ func (a *App) translateClipboardText() {
 	a.updateStatus("Getting clipboard text...")
 	text, err := clipboard.ReadAll()
 	if err != nil {
-		a.updateStatus(fmt.Sprintf("Error reading clipboard: %v", err))
+		a.updateStatus("Error reading clipboard: %v", err)
 		return
 	}
 
@@ -245,11 +246,20 @@ func (a *App) getSelectedTextWithCopy() (string, error) {
 }
 
 func (a *App) streamTranslateWithOllama(text string) {
-	a.startTime = time.Now()
-	a.isStreaming = true
-
-	// Start timer update goroutine
-	go a.updateTimer()
+	stopTick := make(chan struct{})
+	defer close(stopTick)
+	go func() {
+		ticker := time.Tick(100 * time.Millisecond)
+		startTime := time.Now()
+		for {
+			select {
+			case <-stopTick:
+				return
+			case now := <-ticker:
+				a.updateStatus("Translating... %.1fs", now.Sub(startTime).Seconds())
+			}
+		}
+	}()
 
 	// Create a smart translation prompt
 	prompt := fmt.Sprintf("Identify the language of the following text. If the text is in English, translate to German. If it is not in English, translate it to English. Provide only the translation, with no explanation or extra text.\n\n%s", text)
@@ -262,8 +272,7 @@ func (a *App) streamTranslateWithOllama(text string) {
 
 	jsonData, err := json.Marshal(reqBody)
 	if err != nil {
-		a.isStreaming = false
-		a.updateStatus(fmt.Sprintf("Failed to marshal request: %v", err))
+		a.updateStatus("Failed to marshal request: %v", err)
 		return
 	}
 
@@ -272,8 +281,7 @@ func (a *App) streamTranslateWithOllama(text string) {
 
 	req, err := http.NewRequestWithContext(ctx, "POST", ollamaURL, bytes.NewBuffer(jsonData))
 	if err != nil {
-		a.isStreaming = false
-		a.updateStatus(fmt.Sprintf("Failed to create request: %v", err))
+		a.updateStatus("Failed to create request: %v", err)
 		return
 	}
 
@@ -282,15 +290,13 @@ func (a *App) streamTranslateWithOllama(text string) {
 	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
-		a.isStreaming = false
-		a.updateStatus(fmt.Sprintf("Failed to make request to Ollama: %v", err))
+		a.updateStatus("Failed to make request to Ollama: %v", err)
 		return
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		a.isStreaming = false
-		a.updateStatus(fmt.Sprintf("Ollama returned status %d", resp.StatusCode))
+		a.updateStatus("Ollama returned status %d", resp.StatusCode)
 		return
 	}
 
@@ -304,8 +310,7 @@ func (a *App) streamTranslateWithOllama(text string) {
 			if err.Error() == "EOF" {
 				break
 			}
-			a.isStreaming = false
-			a.updateStatus(fmt.Sprintf("Failed to decode response: %v", err))
+			a.updateStatus("Failed to decode response: %v", err)
 			return
 		}
 
@@ -319,22 +324,14 @@ func (a *App) streamTranslateWithOllama(text string) {
 			break
 		}
 	}
-
-	a.isStreaming = false
-	elapsed := time.Since(a.startTime)
-	a.updateStatus(fmt.Sprintf("Translation completed in %.1fs", elapsed.Seconds()))
 }
 
-func (a *App) updateTimer() {
-	for a.isStreaming {
-		elapsed := time.Since(a.startTime)
-		a.updateStatus(fmt.Sprintf("Translating... %.1fs", elapsed.Seconds()))
-		time.Sleep(100 * time.Millisecond)
-	}
-}
+func (a *App) updateStatus(format string, args ...any) {
+	text := fmt.Sprintf(format, args...)
 
-func (a *App) updateStatus(message string) {
-	a.statusText.SetText(message)
+	a.statusMu.Lock()
+	defer a.statusMu.Unlock()
+	a.statusText.SetText(text)
 }
 
 func (a *App) showSettings() {
@@ -352,7 +349,7 @@ func (a *App) showSettings() {
 	saveBtn := widget.NewButton("Save", func() {
 		// Update the model name
 		a.ModelName = modelEntry.Text
-		a.updateStatus(fmt.Sprintf("Settings saved. Using model: %s", a.ModelName))
+		a.updateStatus("Settings saved. Using model: %s", a.ModelName)
 		settingsWindow.Close()
 	})
 
