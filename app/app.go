@@ -19,7 +19,7 @@ import (
 	"github.com/atotto/clipboard"
 )
 
-//go:embed lai.png
+//go:embed lai-60x60@3x.png
 var iconData []byte
 
 const (
@@ -66,7 +66,7 @@ func (a *App) Run() {
 
 func (a *App) setupApp() {
 	// Set the app icon using embedded PNG
-	iconResource := fyne.NewStaticResource("lai.png", iconData)
+	iconResource := fyne.NewStaticResource("lai-60x60@3x.png", iconData)
 	a.app.SetIcon(iconResource)
 
 	// Create a window that will be hidden by default
