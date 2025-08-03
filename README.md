@@ -17,8 +17,8 @@ A Mac menu bar application built in Go that uses local Ollama AI models to trans
    # Install Ollama
    curl -fsSL https://ollama.ai/install.sh | sh
    
-   # Pull a model (e.g., gemma3n:e4b)
-   ollama pull gemma3n:e4b
+   # Pull a model (e.g., gemini3n:e4b)
+   ollama pull gemini3n:e4b
    
    # Start Ollama server
    ollama serve
@@ -68,7 +68,7 @@ A Mac menu bar application built in Go that uses local Ollama AI models to trans
 
 The app uses these default settings:
 - **Ollama URL**: `http://localhost:11434/api/generate`
-- **Default Model**: `gemma3n:e4b`
+- **Default Model**: `gemini3n:e4b`
 
 You can change the model through the Settings dialog in the app.
 

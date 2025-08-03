@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	_ "embed"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -19,17 +20,22 @@ import (
 	"github.com/atotto/clipboard"
 )
 
+//go:embed lai.png
+var iconData []byte
+
 const (
 	ollamaURL    = "http://localhost:11434/api/generate"
 	defaultModel = "gemma3n:e4b"
 )
 
 type App struct {
-	fyneApp    fyne.App
-	window     fyne.Window
-	statusText *widget.Label
-	resultText *widget.Entry
-	modelName  string
+	fyneApp     fyne.App
+	window      fyne.Window
+	statusText  *widget.Label
+	resultText  *widget.Entry
+	modelName   string
+	startTime   time.Time
+	isStreaming bool
 }
 
 type OllamaRequest struct {
@@ -57,11 +63,14 @@ func main() {
 
 func (a *App) setupApp() {
 	a.fyneApp = app.New()
-	a.fyneApp.SetIcon(nil) // You can add an icon resource here
+	
+	// Set the app icon using embedded PNG
+	iconResource := fyne.NewStaticResource("lai.png", iconData)
+	a.fyneApp.SetIcon(iconResource)
 
 	// Create a window that will be hidden by default
 	a.window = a.fyneApp.NewWindow("lai")
-	a.window.Resize(fyne.NewSize(450, 400))
+	a.window.Resize(fyne.NewSize(600, 500))
 	a.window.SetCloseIntercept(func() {
 		a.window.Hide() // Hide instead of closing
 	})
@@ -70,11 +79,11 @@ func (a *App) setupApp() {
 	a.setupKeyboardShortcuts()
 
 	// Create UI elements
-	a.statusText = widget.NewLabel("Click 'Translate' to translate text from clipboard")
+	a.statusText = widget.NewLabel("Click 'Translate' to translate text to English")
 	a.statusText.Wrapping = fyne.TextWrapWord
 
 	a.resultText = widget.NewMultiLineEntry()
-	a.resultText.SetPlaceHolder("Translation will appear here...")
+	a.resultText.SetPlaceHolder("English translation will appear here...")
 	a.resultText.Wrapping = fyne.TextWrapWord
 
 	// Create buttons
@@ -96,13 +105,17 @@ func (a *App) setupApp() {
 
 	buttonContainer := container.NewHBox(translateBtn, translateSelectedBtn, settingsBtn, closeBtn)
 
-	content := container.NewVBox(
+	// Create top section with status and buttons
+	topSection := container.NewVBox(
 		a.statusText,
 		widget.NewSeparator(),
-		widget.NewLabel("Translation Result:"),
-		a.resultText,
 		buttonContainer,
+		widget.NewSeparator(),
+		widget.NewLabel("English Translation:"),
 	)
+
+	// Use container.NewBorder to make text box take all remaining space
+	content := container.NewBorder(topSection, nil, nil, nil, a.resultText)
 
 	a.window.SetContent(content)
 	a.window.Show() // Show initially
@@ -176,17 +189,10 @@ func (a *App) translateSelectedText() {
 	}
 
 	a.updateStatus("Translating selected text...")
+	a.resultText.SetText("")
 
-	// Translate the text
-	translation, err := a.translateWithOllama(text)
-	if err != nil {
-		log.Printf("Translation error: %v", err)
-		a.updateStatus(fmt.Sprintf("Translation failed: %v", err))
-		return
-	}
-
-	a.resultText.SetText(translation)
-	a.updateStatus("Translation completed")
+	// Start streaming translation
+	go a.streamTranslateWithOllama(text)
 }
 
 func (a *App) translateClipboardText() {
@@ -204,17 +210,10 @@ func (a *App) translateClipboardText() {
 	}
 
 	a.updateStatus("Translating...")
+	a.resultText.SetText("")
 
-	// Translate the text
-	translation, err := a.translateWithOllama(text)
-	if err != nil {
-		log.Printf("Translation error: %v", err)
-		a.updateStatus(fmt.Sprintf("Translation failed: %v", err))
-		return
-	}
-
-	a.resultText.SetText(translation)
-	a.updateStatus("Translation completed")
+	// Start streaming translation
+	go a.streamTranslateWithOllama(text)
 }
 
 func (a *App) getSelectedTextWithCopy() (string, error) {
@@ -252,19 +251,27 @@ func (a *App) getSelectedTextWithCopy() (string, error) {
 	return text, nil
 }
 
-func (a *App) translateWithOllama(text string) (string, error) {
-	// Create translation prompt
-	prompt := fmt.Sprintf("Translate the following text to English. If it's already in English, translate it to Spanish. Only provide the translation, no explanations:\n\n%s", text)
+func (a *App) streamTranslateWithOllama(text string) {
+	a.startTime = time.Now()
+	a.isStreaming = true
+
+	// Start timer update goroutine
+	go a.updateTimer()
+
+	// Create translation prompt - always translate to English
+	prompt := fmt.Sprintf("Translate the following text to English. Only provide the English translation, no explanations or additional text:\n\n%s", text)
 
 	reqBody := OllamaRequest{
 		Model:  a.modelName,
 		Prompt: prompt,
-		Stream: false,
+		Stream: true,
 	}
 
 	jsonData, err := json.Marshal(reqBody)
 	if err != nil {
-		return "", fmt.Errorf("failed to marshal request: %w", err)
+		a.isStreaming = false
+		a.updateStatus(fmt.Sprintf("Failed to marshal request: %v", err))
+		return
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -272,7 +279,9 @@ func (a *App) translateWithOllama(text string) (string, error) {
 
 	req, err := http.NewRequestWithContext(ctx, "POST", ollamaURL, bytes.NewBuffer(jsonData))
 	if err != nil {
-		return "", fmt.Errorf("failed to create request: %w", err)
+		a.isStreaming = false
+		a.updateStatus(fmt.Sprintf("Failed to create request: %v", err))
+		return
 	}
 
 	req.Header.Set("Content-Type", "application/json")
@@ -280,20 +289,55 @@ func (a *App) translateWithOllama(text string) (string, error) {
 	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("failed to make request to Ollama: %w", err)
+		a.isStreaming = false
+		a.updateStatus(fmt.Sprintf("Failed to make request to Ollama: %v", err))
+		return
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("Ollama returned status %d", resp.StatusCode)
+		a.isStreaming = false
+		a.updateStatus(fmt.Sprintf("Ollama returned status %d", resp.StatusCode))
+		return
 	}
 
-	var ollamaResp OllamaResponse
-	if err := json.NewDecoder(resp.Body).Decode(&ollamaResp); err != nil {
-		return "", fmt.Errorf("failed to decode response: %w", err)
+	// Stream the response
+	decoder := json.NewDecoder(resp.Body)
+	var fullResponse strings.Builder
+
+	for {
+		var ollamaResp OllamaResponse
+		if err := decoder.Decode(&ollamaResp); err != nil {
+			if err.Error() == "EOF" {
+				break
+			}
+			a.isStreaming = false
+			a.updateStatus(fmt.Sprintf("Failed to decode response: %v", err))
+			return
+		}
+
+		// Append the response chunk
+		fullResponse.WriteString(ollamaResp.Response)
+		
+		// Update UI with current text
+		a.resultText.SetText(fullResponse.String())
+
+		if ollamaResp.Done {
+			break
+		}
 	}
 
-	return strings.TrimSpace(ollamaResp.Response), nil
+	a.isStreaming = false
+	elapsed := time.Since(a.startTime)
+	a.updateStatus(fmt.Sprintf("Translation completed in %.1fs", elapsed.Seconds()))
+}
+
+func (a *App) updateTimer() {
+	for a.isStreaming {
+		elapsed := time.Since(a.startTime)
+		a.updateStatus(fmt.Sprintf("Translating... %.1fs", elapsed.Seconds()))
+		time.Sleep(100 * time.Millisecond)
+	}
 }
 
 func (a *App) updateStatus(message string) {
