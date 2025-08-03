@@ -80,11 +80,11 @@ func (a *App) setupApp() {
 	a.setupKeyboardShortcuts()
 
 	// Create UI elements
-	a.statusText = widget.NewLabel("Click 'Translate' to translate text to English")
+	a.statusText = widget.NewLabel("Click 'Translate' to start translating")
 	a.statusText.Wrapping = fyne.TextWrapWord
 
 	a.resultText = widget.NewMultiLineEntry()
-	a.resultText.SetPlaceHolder("English translation will appear here...")
+	a.resultText.SetPlaceHolder("Translation will appear here...")
 	a.resultText.Wrapping = fyne.TextWrapWord
 
 	// Create buttons
@@ -112,7 +112,7 @@ func (a *App) setupApp() {
 		widget.NewSeparator(),
 		buttonContainer,
 		widget.NewSeparator(),
-		widget.NewLabel("English Translation:"),
+		widget.NewLabel("Translation:"),
 	)
 
 	// Use container.NewBorder to make text box take all remaining space
@@ -251,8 +251,8 @@ func (a *App) streamTranslateWithOllama(text string) {
 	// Start timer update goroutine
 	go a.updateTimer()
 
-	// Create translation prompt - always translate to English
-	prompt := fmt.Sprintf("Translate the following text to English. Only provide the English translation, no explanations or additional text:\n\n%s", text)
+	// Create a smart translation prompt
+	prompt := fmt.Sprintf("Identify the language of the following text. If the text is in English, translate to German. If it is not in English, translate it to English. Provide only the translation, with no explanation or extra text.\n\n%s", text)
 
 	reqBody := OllamaRequest{
 		Model:  a.ModelName,
