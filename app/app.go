@@ -24,14 +24,16 @@ import (
 var iconData []byte
 
 const (
-	ollamaURL    = "http://localhost:11434/api/generate"
-	defaultModel = "gemma3n:e4b"
+	ollamaURL       = "http://localhost:11434/api/generate"
+	ollamaModelsURL = "http://localhost:11434/api/tags"
+	defaultModel    = "gemma3n:e4b"
 )
 
 type App struct {
-	modelName string
-	app       fyne.App
-	window    fyne.Window
+	modelName     string
+	app           fyne.App
+	window        fyne.Window
+	modelDropdown *widget.Select
 
 	input  binding.String
 	result binding.String
@@ -47,6 +49,16 @@ type OllamaRequest struct {
 type OllamaResponse struct {
 	Response string `json:"response"`
 	Done     bool   `json:"done"`
+}
+
+type OllamaModel struct {
+	Name       string    `json:"name"`
+	ModifiedAt time.Time `json:"modified_at"`
+	Size       int64     `json:"size"`
+}
+
+type OllamaModelsResponse struct {
+	Models []OllamaModel `json:"models"`
 }
 
 func New(app fyne.App) *App {
@@ -85,6 +97,23 @@ func (a *App) setupApp() {
 	statusText := widget.NewLabelWithData(a.status)
 	statusText.Wrapping = fyne.TextWrapWord
 
+	// Create model dropdown
+	a.modelDropdown = widget.NewSelect([]string{a.modelName}, func(selected string) {
+		if selected != "" {
+			a.modelName = selected
+			a.setStatus("Model changed to: %s", selected)
+		}
+	})
+	a.modelDropdown.SetSelected(a.modelName)
+	a.modelDropdown.PlaceHolder = "Select model..."
+
+	// Model selection container
+	modelContainer := container.NewHBox(
+		widget.NewLabel("Model:"),
+		a.modelDropdown,
+		widget.NewButton("Refresh", func() { a.refreshModelDropdown() }),
+	)
+
 	a.input = binding.NewString()
 	inputText := widget.NewEntryWithData(a.input)
 	inputText.SetPlaceHolder("Enter text to translate...")
@@ -107,6 +136,8 @@ func (a *App) setupApp() {
 	topSection := container.NewVBox(
 		statusText,
 		widget.NewSeparator(),
+		modelContainer,
+		widget.NewSeparator(),
 		buttonContainer,
 		widget.NewSeparator(),
 		widget.NewLabel("Input:"),
@@ -118,6 +149,9 @@ func (a *App) setupApp() {
 
 	a.window.SetContent(content)
 	a.window.Show()
+
+	// Load available models on startup
+	a.refreshModelDropdown()
 
 	if desk, ok := a.app.(desktop.App); ok {
 		desk.SetSystemTrayMenu(fyne.NewMenu("lai",
@@ -297,6 +331,82 @@ func (a *App) streamTranslateWithOllama(text string) {
 
 func (a *App) setStatus(format string, args ...any) {
 	a.status.Set(fmt.Sprintf(format, args...))
+}
+
+func (a *App) fetchAvailableModels() ([]string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, "GET", ollamaModelsURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to make request to Ollama: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("ollama returned status %d", resp.StatusCode)
+	}
+
+	var modelsResp OllamaModelsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&modelsResp); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	var modelNames []string
+	for _, model := range modelsResp.Models {
+		modelNames = append(modelNames, model.Name)
+	}
+
+	return modelNames, nil
+}
+
+func (a *App) refreshModelDropdown() {
+	go func() {
+		a.setStatus("Loading available models...")
+		models, err := a.fetchAvailableModels()
+		if err != nil {
+			a.setStatus("Failed to load models: %v", err)
+			// Fallback to current model if fetch fails
+			if a.modelDropdown != nil {
+				a.modelDropdown.Options = []string{a.modelName}
+				a.modelDropdown.SetSelected(a.modelName)
+				a.modelDropdown.Refresh()
+			}
+			return
+		}
+
+		if len(models) == 0 {
+			a.setStatus("No models found on Ollama server")
+			return
+		}
+
+		// Update dropdown options
+		if a.modelDropdown != nil {
+			a.modelDropdown.Options = models
+			// Select current model if it exists in the list, otherwise select first
+			found := false
+			for _, model := range models {
+				if model == a.modelName {
+					a.modelDropdown.SetSelected(a.modelName)
+					found = true
+					break
+				}
+			}
+			if !found && len(models) > 0 {
+				a.modelName = models[0]
+				a.modelDropdown.SetSelected(models[0])
+			}
+			a.modelDropdown.Refresh()
+		}
+
+		a.setStatus("Loaded %d models from Ollama server", len(models))
+	}()
 }
 
 func (a *App) showSettings() {
